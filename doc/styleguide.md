@@ -171,6 +171,10 @@ exceptions where the quoting is still needed for other reasons.
   suggests that e.g. `var= cmd` is confusing with `var=cmd`.
 - `$*` and `${array[*]}` need to be always quoted because they can be affected
   by the word splitting in bash <= 4.2 even in the above contexts.
+- When joining array elements into a scalar variable, prefer `"${array[*]}"`
+  over `"${array[@]}"`, and ensure `IFS` is set to the intended separator
+  (typically `local IFS=$' \t\n'`), because `[*]` joins by the first character
+  of `IFS`.
 - In the following contexts, double-quoting of shell expansions is needed
   unless the result of expansions is intentionally treated as glob patterns or
   regular expressions.
