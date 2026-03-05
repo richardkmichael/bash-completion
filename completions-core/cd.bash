@@ -52,7 +52,11 @@ _comp_cmd_cd__compgen_cdpath()
 
     if ((${#_cdpaths[@]} == 1)); then
         _p=${_cdpaths[0]}
-        if [[ $_p == "$cur" && $_p != */ ]]; then
+        # Append / only when the directory does not exist in the
+        # current working directory; if it does, compopt -o filenames
+        # (set by the caller) handles the slash, and appending
+        # here would double it.
+        if [[ $_p == "$cur" && $_p != */ && ! -d $_p ]]; then
             _cdpaths[0]=$_p/
         fi
     fi
