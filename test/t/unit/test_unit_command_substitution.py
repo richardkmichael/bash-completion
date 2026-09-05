@@ -226,6 +226,23 @@ class TestUnitCommandSubstitution:
             == self.wordlist
         )
 
+    def test_brace_group(self, bash, functions):
+        """A { opening a brace group is a command boundary.
+
+        Bash's own completion lists { among its command separators, so
+        "{ csub_cmd " completes csub_cmd's arguments at the top level.
+        Inside $( the inner scanner must do the same rather than take
+        { as the command name.
+        """
+        assert assert_complete(bash, "echo $( { csub_cmd ") == self.wordlist
+
+    def test_brace_expansion_mid_word(self, bash, functions):
+        """A { inside a word is brace expansion, not a command boundary."""
+        expected = (
+            self.wordlist if functions == "simple" else self.later_wordlist
+        )
+        assert assert_complete(bash, "echo $(csub_cmd a{b,c} ") == expected
+
     def test_process_substitution(self, bash, functions):
         """Process substitution paren does not close the substitution."""
         assert assert_complete(

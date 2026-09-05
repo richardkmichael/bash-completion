@@ -1753,7 +1753,8 @@ _comp_initialize()
             # Find the start of the current simple command within
             # inner_line.  A "command boundary" is a position where a
             # new simple command can begin -- after a separator
-            # (;, |, ||, &&, &) or at the start of the string.
+            # (;, |, ||, &&, &, or a brace group's {) or at the start
+            # of the string.
             # _at_boundary is true until the first non-whitespace token
             # of a command is seen.  Compound constructs (subshells,
             # arithmetic) that open at a boundary are skipped whole,
@@ -1762,7 +1763,7 @@ _comp_initialize()
             #   pb:$q (bare paren opened at a command boundary),
             #   p:$q  (bare paren, not at boundary).
             local -a _inner_paren_stack=()
-            local _cmd_start=0 _at_boundary=1 _inner_in_quote="" _popped
+            local _cmd_start=0 _at_boundary=1 _inner_in_quote="" _popped _next
             for ((i = 0; i < ${#inner_line}; i++)); do
                 ch=${inner_line:i:1}
                 case $ch in
@@ -1843,6 +1844,22 @@ _comp_initialize()
                             _cmd_start=$((i + 1))
                         fi
                         _at_boundary=1
+                        ;;
+                    '{') # Brace group opener
+                        [[ $_inner_in_quote ]] && continue
+                        ((${#_inner_paren_stack[@]})) && continue
+                        # { is a command separator for bash's own completion
+                        # (COMMAND_SEPARATORS in bashline.c), but only where
+                        # a reserved word can appear: at a command position
+                        # and followed by whitespace or the end of the line.
+                        # Elsewhere, as in a{b,c}, it is part of a word.
+                        _next=${inner_line:i+1:1}
+                        if ((_at_boundary)) &&
+                            [[ ! $_next || $_next == [[:space:]] ]]; then
+                            _cmd_start=$((i + 1))
+                        else
+                            _at_boundary=0
+                        fi
                         ;;
                     '(')
                         [[ $_inner_in_quote ]] && continue
