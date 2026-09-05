@@ -197,6 +197,43 @@ class TestUnitCommandSubstitution:
         )
         assert assert_complete(bash, "echo $(csub_cmd $'\\')' ") == expected
 
+    def test_backtick_containing_paren(self, bash, functions):
+        """Paren inside a closed backtick substitution does not close the $(.
+
+        Bash keeps the $( open across a complete `...` pair, so the )
+        inside it belongs to that substitution, not to the enclosing $(.
+        """
+        expected = (
+            self.wordlist if functions == "simple" else self.later_wordlist
+        )
+        assert assert_complete(bash, "echo $(csub_cmd `echo )` ") == expected
+
+    def test_backtick_in_double_quotes(self, bash, functions):
+        """Double-quote context is restored after a backtick pair closes.
+
+        In "`echo )` )" the second ) is still inside the double quotes.
+        If closing the backtick pair dropped the saved quote state, that
+        ) would be read as closing the $(.
+        """
+        expected = (
+            self.wordlist if functions == "simple" else self.later_wordlist
+        )
+        assert (
+            assert_complete(bash, 'echo $(csub_cmd "`echo )` )" ') == expected
+        )
+
+    @pytest.mark.xfail(
+        reason="an unclosed ` is not a command boundary, unlike at the "
+        "top level"
+    )
+    def test_unclosed_backtick(self, bash, functions):
+        """Bash treats ` as a command separator, so at the top level
+        "csub_cmd `echo " completes for echo.  Inside $( the rest of the
+        line is swallowed and csub_cmd keeps the completion."""
+        assert assert_complete(
+            bash, "echo $(csub_cmd `echo ", cwd="shared/default"
+        ) == ["bar", "bar bar.d/", "foo", "foo.d/"]
+
     def test_subshell(self, bash, functions):
         """Inner subshell paren incorrectly closes the substitution."""
         assert (
