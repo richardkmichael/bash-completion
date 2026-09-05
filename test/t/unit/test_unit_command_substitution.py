@@ -136,6 +136,26 @@ class TestUnitCommandSubstitution:
         """
         assert assert_complete(bash, 'echo "$(csub_cmd ') == self.wordlist
 
+    def test_dquote_with_nested_csub_containing_semicolon(
+        self, bash, functions
+    ):
+        """Semicolon inside a closed $() within double quotes is not a separator.
+
+        In echo $(csub_cmd "$(sub "x; y")" , the inner scanner walks
+        inner_line = csub_cmd "$(sub "x; y")" .  The $( inside "..." should
+        reset the quote context (as the outer scanner does), so the ; between
+        the " pair inside the substitution stays quoted.  Without the reset,
+        the first " inside $(sub ...) prematurely closes _inner_in_quote,
+        exposing ; as a command separator at depth 0.
+        """
+        expected = (
+            self.wordlist if functions == "simple" else self.later_wordlist
+        )
+        assert (
+            assert_complete(bash, 'echo $(csub_cmd "$(sub "x; y")" ')
+            == expected
+        )
+
     def test_quoted_paren(self, bash, functions):
         """Paren inside quotes incorrectly closes the substitution."""
         expected = (
@@ -163,6 +183,13 @@ class TestUnitCommandSubstitution:
         )
         assert assert_complete(bash, 'echo $(csub_cmd "\\")" ') == expected
 
+    def test_subshell(self, bash, functions):
+        """Inner subshell paren incorrectly closes the substitution."""
+        assert (
+            assert_complete(bash, "echo $( (subshell) csub_cmd ")
+            == self.wordlist
+        )
+
     def test_time_prefix(self, bash, functions):
         """A command-prefix word such as time hands over to its command.
 
@@ -177,6 +204,13 @@ class TestUnitCommandSubstitution:
             self.wordlist if functions == "simple" else self.later_wordlist
         )
         assert assert_complete(bash, "echo $(csub_cmd $(( 1+1 )) ") == expected
+
+    def test_arithmetic_command(self, bash, functions):
+        """Arithmetic command paren incorrectly closes the substitution."""
+        assert (
+            assert_complete(bash, "echo $( (( x++ )); csub_cmd ")
+            == self.wordlist
+        )
 
     def test_process_substitution(self, bash, functions):
         """Process substitution paren does not close the substitution."""
@@ -200,6 +234,91 @@ class TestUnitCommandSubstitution:
             "echo $( case $x in (y) csub_cmd ",
             cwd="shared/default",
         ) == ["bar", "bar bar.d/", "foo", "foo.d/"]
+
+    def test_pipe(self, bash, functions):
+        """A | starts a new simple command."""
+        assert assert_complete(bash, "echo $(a | csub_cmd ") == self.wordlist
+
+    def test_pipe_stderr(self, bash, functions):
+        """A |& starts a new simple command."""
+        assert assert_complete(bash, "echo $(a |& csub_cmd ") == self.wordlist
+
+    def test_or_list(self, bash, functions):
+        """A || starts a new simple command."""
+        assert assert_complete(bash, "echo $(a || csub_cmd ") == self.wordlist
+
+    def test_and_list(self, bash, functions):
+        """A && starts a new simple command."""
+        assert assert_complete(bash, "echo $(a && csub_cmd ") == self.wordlist
+
+    def test_background(self, bash, functions):
+        """A single & starts a new simple command."""
+        assert assert_complete(bash, "echo $(a & csub_cmd ") == self.wordlist
+
+    def test_separator_in_quotes(self, bash, functions):
+        """A separator inside quotes is not a command boundary."""
+        expected = (
+            self.wordlist if functions == "simple" else self.later_wordlist
+        )
+        assert assert_complete(bash, 'echo $(csub_cmd "a | b" ') == expected
+
+    def test_redirect_noclobber(self, bash, functions):
+        """The | of >| is a redirection, not a separator.
+
+        Bash's own completion special-cases >| at the top level, so the
+        inner scanner must match it.
+        """
+        expected = (
+            self.wordlist if functions == "simple" else self.later_wordlist
+        )
+        assert (
+            assert_complete(bash, "echo $(csub_cmd >| /dev/null ") == expected
+        )
+
+    def test_redirect_dup(self, bash, functions):
+        """The & of 2>&1 is a redirection, not a separator.
+
+        Bash's own completion gets this wrong at the top level, where
+        "cmd 2>&1 " completes command names.  Inside $( the scanner
+        recognises the operator, so the enclosing command keeps the
+        completion.
+        """
+        expected = (
+            self.wordlist if functions == "simple" else self.later_wordlist
+        )
+        assert assert_complete(bash, "echo $(csub_cmd 2>&1 ") == expected
+
+    def test_redirect_all(self, bash, functions):
+        """The & of &> is a redirection, not a separator."""
+        expected = (
+            self.wordlist if functions == "simple" else self.later_wordlist
+        )
+        assert (
+            assert_complete(bash, "echo $(csub_cmd &>/dev/null ") == expected
+        )
+
+    def test_redirect_input_dup(self, bash, functions):
+        """The & of <& is a redirection, not a separator."""
+        expected = (
+            self.wordlist if functions == "simple" else self.later_wordlist
+        )
+        assert assert_complete(bash, "echo $(csub_cmd <&0 ") == expected
+
+    @pytest.mark.xfail(
+        reason="a redirection before the command word hides it, as at "
+        "the top level"
+    )
+    def test_redirection_before_command(self, bash, functions):
+        assert (
+            assert_complete(bash, "echo $( >/dev/null csub_cmd ")
+            == self.wordlist
+        )
+
+    @pytest.mark.xfail(
+        reason="! is not a command boundary, as at the top level"
+    )
+    def test_bang_prefix(self, bash, functions):
+        assert assert_complete(bash, "echo $( ! csub_cmd ") == self.wordlist
 
     # Not tested: scanner is not comment-aware.
     # A # comment containing ) would incorrectly close the $(.  However,

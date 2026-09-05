@@ -1640,9 +1640,14 @@ _comp_initialize()
     # For example, in "echo $(cmd1 arg $(cmd2 ", cur is the
     # single blob "$(cmd1 arg $(cmd2 ".
     #
-    # Walk cur character by character, tracking quotes and a paren
-    # stack, to find the position of the last unclosed $(, then
-    # complete its content as a command line of its own.
+    # Two-phase approach:
+    # 1. Outer scan: walk cur character by character, tracking
+    #    quotes and a paren stack, to find the position of the
+    #    last unclosed $(.
+    # 2. Inner scan: walk the substring after that $( to find
+    #    the start of the current simple command.  This carries
+    #    the complexity -- it must distinguish command boundaries
+    #    from separators inside quotes or nested constructs.
     #
     # Note: bash 4.2 has SD_NOSKIPCMD active, so find_cmd_start
     # enters $() and this code path is not reached (cur won't
@@ -1728,6 +1733,118 @@ _comp_initialize()
 
             # Empty or whitespace-only: offer nothing rather than
             # every command name for an empty word.
+            [[ ${inner_line//[[:space:]]/} ]] || return 1
+
+            # Find the start of the current simple command within
+            # inner_line.  A "command boundary" is a position where a
+            # new simple command can begin -- after a separator
+            # (;, |, ||, &&, &) or at the start of the string.
+            # _at_boundary is true until the first non-whitespace token
+            # of a command is seen.  Compound constructs (subshells,
+            # arithmetic) that open at a boundary are skipped whole,
+            # so "$(  (subshell) csub_cmd " dispatches to csub_cmd.
+            # Stack entries: dp:$q (dollar-paren, saved quote $q),
+            #   pb:$q (bare paren opened at a command boundary),
+            #   p:$q  (bare paren, not at boundary).
+            local -a _inner_paren_stack=()
+            local _cmd_start=0 _at_boundary=1 _inner_in_quote="" _popped
+            for ((i = 0; i < ${#inner_line}; i++)); do
+                ch=${inner_line:i:1}
+                case $ch in
+                    \') # Single quote: toggle unless inside double quotes
+                        [[ $_inner_in_quote == '"' ]] && continue
+                        [[ $_inner_in_quote == "'" ]] && _inner_in_quote="" || _inner_in_quote="'"
+                        ;;
+                    '"') # Double quote: toggle unless inside single quotes
+                        [[ $_inner_in_quote == "'" ]] && continue
+                        [[ $_inner_in_quote == '"' ]] && _inner_in_quote="" || _inner_in_quote='"'
+                        ;;
+                    \\) # Backslash: skip next char (literal in single quotes)
+                        [[ $_inner_in_quote == "'" ]] && continue
+                        ((i++))
+                        ;;
+                    '$') # $( resets quote context; bare $ is ignored
+                        [[ $_inner_in_quote == "'" ]] && continue
+                        [[ ${inner_line:i:2} == '$(' ]] || continue
+                        _inner_paren_stack+=("dp:$_inner_in_quote")
+                        _inner_in_quote=""
+                        ((i++))
+                        ;;
+                    ';')
+                        [[ $_inner_in_quote ]] && continue
+                        ((${#_inner_paren_stack[@]})) && continue
+                        _cmd_start=$((i + 1))
+                        _at_boundary=1
+                        ;;
+                    '|')
+                        [[ $_inner_in_quote ]] && continue
+                        ((${#_inner_paren_stack[@]})) && continue
+                        # >| is a redirection operator, not a separator.
+                        if [[ $i != 0 && ${inner_line:i-1:1} == '>' ]]; then
+                            _at_boundary=0
+                            continue
+                        fi
+                        case ${inner_line:i:2} in
+                            '||' | '|&')
+                                _cmd_start=$((i + 2))
+                                ((i++))
+                                ;;
+                            *) _cmd_start=$((i + 1)) ;;
+                        esac
+                        _at_boundary=1
+                        ;;
+                    '&')
+                        [[ $_inner_in_quote ]] && continue
+                        ((${#_inner_paren_stack[@]})) && continue
+                        # The & of >&, <& and &> belongs to a redirection
+                        # operator, not a separator.
+                        if [[ $i != 0 && ${inner_line:i-1:1} == [\<\>] ||
+                            ${inner_line:i+1:1} == '>' ]]; then
+                            _at_boundary=0
+                            continue
+                        fi
+                        if [[ ${inner_line:i:2} == '&&' ]]; then
+                            _cmd_start=$((i + 2))
+                            ((i++))
+                        else
+                            _cmd_start=$((i + 1))
+                        fi
+                        _at_boundary=1
+                        ;;
+                    '(')
+                        [[ $_inner_in_quote ]] && continue
+                        if ((_at_boundary)) &&
+                            ((${#_inner_paren_stack[@]} == 0)); then
+                            _inner_paren_stack+=("pb:$_inner_in_quote")
+                        else
+                            _inner_paren_stack+=("p:$_inner_in_quote")
+                        fi
+                        ;;
+                    ')')
+                        [[ $_inner_in_quote ]] && continue
+                        if ((${#_inner_paren_stack[@]})); then
+                            _popped=${_inner_paren_stack[-1]}
+                            _inner_in_quote=${_popped#*:}
+                            unset -v '_inner_paren_stack[-1]'
+                            if ((${#_inner_paren_stack[@]} == 0)) &&
+                                [[ ${_popped%%:*} == pb ]]; then
+                                _at_boundary=1
+                                _cmd_start=$((i + 1))
+                            fi
+                            continue
+                        fi
+                        _at_boundary=0
+                        ;;
+                    *)
+                        [[ $_inner_in_quote ]] && continue
+                        [[ $ch == [[:space:]] ]] && continue
+                        ((${#_inner_paren_stack[@]})) && continue
+                        _at_boundary=0
+                        ;;
+                esac
+            done
+
+            inner_line=${inner_line:_cmd_start}
             [[ ${inner_line//[[:space:]]/} ]] || return 1
 
             COMP_LINE=$inner_line
