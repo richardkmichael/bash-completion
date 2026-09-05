@@ -1634,6 +1634,126 @@ _comp_initialize()
     local redir='@(?(+([0-9])|{[a-zA-Z_]*([a-zA-Z_0-9])})@(>?([>|&])|<?([>&])|<<?([-<]))|&>?(>))'
     _comp_get_words -n "$exclude<>&" cur prev words cword
 
+    # Since bash 4.3, find_cmd_start() in bashline.c skips over
+    # unclosed $( (SD_NOSKIPCMD was commented out), causing the
+    # entire $( content to appear as one token in COMP_WORDS.
+    # For example, in "echo $(cmd1 arg $(cmd2 ", cur is the
+    # single blob "$(cmd1 arg $(cmd2 ".
+    #
+    # Walk cur character by character, tracking quotes and a paren
+    # stack, to find the position of the last unclosed $(, then
+    # complete its content as a command line of its own.
+    #
+    # Note: bash 4.2 has SD_NOSKIPCMD active, so find_cmd_start
+    # enters $() and this code path is not reached (cur won't
+    # contain $().  However, bash 4.2 has a separate bug where
+    # find_cmd_start fails to return to the enclosing $( after
+    # a closed inner $(...) -- it dispatches to the closed
+    # inner context instead.  For example, in
+    # "echo $(outercmd $(innercmd arg) ", bash 4.2 completes
+    # for innercmd (the closed substitution) rather than
+    # outercmd (the enclosing open one), with COMP_LINE/
+    # COMP_WORDS reflecting the wrong context.  This is a bash
+    # bug, unfixable from bash-completion since the COMP_*
+    # variables are already wrong when our code runs.
+    # Ref: find_cmd_start in bashline.c; SD_NOSKIPCMD active
+    # at tag bash-4.2, commented out at tag bash-4.3-alpha.
+    #
+    # Requires bash >= 4.3 for negative array subscripts
+    # (paren_stack[-1]).
+    if ((BASH_VERSINFO[0] >= 5 || BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 3)) &&
+        [[ $cur == *'$('* ]]; then
+        # Each paren_stack entry encodes the paren type and the
+        # in_quote state to restore when the paren is closed:
+        #   dp$i:$q  — dollar-paren $( at position $i, saved quote $q
+        #   p:$q     — bare (, saved quote $q
+        local -a paren_stack=()
+        local i n=${#cur}
+        local in_quote="" ch
+        for ((i = 0; i < n; i++)); do
+            ch=${cur:i:1}
+            case $ch in
+                \') # Single quote: toggle unless inside double quotes
+                    [[ $in_quote == '"' ]] && continue
+                    [[ $in_quote == "'" ]] && in_quote="" || in_quote="'"
+                    ;;
+                '"') # Double quote: toggle unless inside single quotes
+                    [[ $in_quote == "'" ]] && continue
+                    [[ $in_quote == '"' ]] && in_quote="" || in_quote='"'
+                    ;;
+                \\) # Backslash: skip next char (literal in single quotes)
+                    [[ $in_quote == "'" ]] && continue
+                    ((i++))
+                    ;;
+                '$') # Only $( is significant; bare $ is ignored
+                    [[ $in_quote == "'" ]] && continue
+                    [[ ${cur:i:2} == '$(' ]] || continue
+                    # $( starts a command substitution in both unquoted and
+                    # double-quoted contexts.  Save and reset quote state so
+                    # the interior is scanned fresh.
+                    paren_stack+=("dp$i:$in_quote")
+                    in_quote=""
+                    ((i++))
+                    ;;
+                '(') # Bare paren: only meaningful outside all quotes
+                    [[ $in_quote ]] && continue
+                    paren_stack+=("p:$in_quote")
+                    ;;
+                ')') # Close paren: only meaningful outside all quotes
+                    [[ $in_quote ]] && continue
+                    ((${#paren_stack[@]})) || continue
+                    in_quote=${paren_stack[-1]#*:}
+                    unset -v 'paren_stack[-1]'
+                    ;;
+            esac
+        done
+
+        # After the scan, paren_stack holds all unclosed parens in order.
+        # The last entry may be a bare paren, e.g. "$(cmd (subshell "
+        # produces ["dp5:...", "p:..."].  Walk backward to find the
+        # rightmost dp entry -- the innermost unclosed $(.
+        local _last_csub=""
+        local _j
+        for ((_j = ${#paren_stack[@]} - 1; _j >= 0; _j--)); do
+            if [[ ${paren_stack[_j]%%:*} == dp* ]]; then
+                _last_csub=${paren_stack[_j]%%:*}
+                _last_csub=${_last_csub#dp}
+                break
+            fi
+        done
+
+        if [[ $_last_csub ]]; then
+            local inner_csub_position=$((_last_csub + 2))
+            local inner_line=${cur:inner_csub_position}
+
+            # Empty or whitespace-only: offer nothing rather than
+            # every command name for an empty word.
+            [[ ${inner_line//[[:space:]]/} ]] || return 1
+
+            COMP_LINE=$inner_line
+            COMP_POINT=${#inner_line}
+            _comp_split COMP_WORDS "$inner_line"
+
+            # _comp_split discards trailing whitespace, but
+            # if a trailing space was present the cursor is
+            # past the last word.  Append an empty word so
+            # COMP_CWORD points to the empty position.
+            if [[ $inner_line == *[[:space:]] ]]; then
+                COMP_WORDS+=("")
+            fi
+            COMP_CWORD=$((${#COMP_WORDS[@]} - 1))
+
+            # Unset words so _comp_command_offset uses
+            # COMP_WORDS directly (same pattern as
+            # _comp_command).
+            local words
+            unset -v words
+
+            _comp_command_offset 0
+            return 1
+        fi
+    fi
+
     # Complete variable names.
     _comp_compgen_variables && return 1
 
