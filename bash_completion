@@ -1674,31 +1674,46 @@ _comp_initialize()
         #   p:$q     — bare (, saved quote $q
         local -a paren_stack=()
         local i n=${#cur}
+        # in_quote holds the enclosing quote: empty when unquoted, ' or ",
+        # or $' inside an ANSI-C string, where backslash still escapes.
         local in_quote="" ch
         for ((i = 0; i < n; i++)); do
             ch=${cur:i:1}
             case $ch in
-                \') # Single quote: toggle unless inside double quotes
+                \') # Single quote: toggle unless inside double quotes.
+                    # Also closes an ANSI-C $'...' string.
                     [[ $in_quote == '"' ]] && continue
-                    [[ $in_quote == "'" ]] && in_quote="" || in_quote="'"
+                    [[ $in_quote ]] && in_quote="" || in_quote="'"
                     ;;
                 '"') # Double quote: toggle unless inside single quotes
-                    [[ $in_quote == "'" ]] && continue
+                    # (plain or ANSI-C)
+                    case $in_quote in "'" | "\$'") continue ;; esac
                     [[ $in_quote == '"' ]] && in_quote="" || in_quote='"'
                     ;;
                 \\) # Backslash: skip next char (literal in single quotes)
                     [[ $in_quote == "'" ]] && continue
                     ((i++))
                     ;;
-                '$') # Only $( is significant; bare $ is ignored
-                    [[ $in_quote == "'" ]] && continue
-                    [[ ${cur:i:2} == '$(' ]] || continue
-                    # $( starts a command substitution in both unquoted and
-                    # double-quoted contexts.  Save and reset quote state so
-                    # the interior is scanned fresh.
-                    paren_stack+=("dp$i:$in_quote")
-                    in_quote=""
-                    ((i++))
+                '$') # $( and ANSI-C $' are significant; bare $ is ignored
+                    case $in_quote in "'" | "\$'") continue ;; esac
+                    case ${cur:i+1:1} in
+                        '(')
+                            # $( starts a command substitution in both
+                            # unquoted and double-quoted contexts.  Save and
+                            # reset quote state so the interior is scanned
+                            # fresh.
+                            paren_stack+=("dp$i:$in_quote")
+                            in_quote=""
+                            ((i++))
+                            ;;
+                        "'")
+                            # $'...' is ANSI-C quoting only when unquoted;
+                            # inside "..." it is a literal $ and quote.
+                            [[ $in_quote ]] && continue
+                            in_quote="\$'"
+                            ((i++))
+                            ;;
+                    esac
                     ;;
                 '(') # Bare paren: only meaningful outside all quotes
                     [[ $in_quote ]] && continue
@@ -1751,24 +1766,42 @@ _comp_initialize()
             for ((i = 0; i < ${#inner_line}; i++)); do
                 ch=${inner_line:i:1}
                 case $ch in
-                    \') # Single quote: toggle unless inside double quotes
+                    \') # Single quote: toggle unless inside double quotes.
+                        # Also closes an ANSI-C $'...' string.
                         [[ $_inner_in_quote == '"' ]] && continue
-                        [[ $_inner_in_quote == "'" ]] && _inner_in_quote="" || _inner_in_quote="'"
+                        if [[ $_inner_in_quote ]]; then
+                            _inner_in_quote=""
+                        else
+                            _inner_in_quote="'"
+                        fi
                         ;;
                     '"') # Double quote: toggle unless inside single quotes
-                        [[ $_inner_in_quote == "'" ]] && continue
-                        [[ $_inner_in_quote == '"' ]] && _inner_in_quote="" || _inner_in_quote='"'
+                        # (plain or ANSI-C)
+                        case $_inner_in_quote in "'" | "\$'") continue ;; esac
+                        if [[ $_inner_in_quote == '"' ]]; then
+                            _inner_in_quote=""
+                        else
+                            _inner_in_quote='"'
+                        fi
                         ;;
                     \\) # Backslash: skip next char (literal in single quotes)
                         [[ $_inner_in_quote == "'" ]] && continue
                         ((i++))
                         ;;
-                    '$') # $( resets quote context; bare $ is ignored
-                        [[ $_inner_in_quote == "'" ]] && continue
-                        [[ ${inner_line:i:2} == '$(' ]] || continue
-                        _inner_paren_stack+=("dp:$_inner_in_quote")
-                        _inner_in_quote=""
-                        ((i++))
+                    '$') # $( and ANSI-C $' are significant; bare $ is ignored
+                        case $_inner_in_quote in "'" | "\$'") continue ;; esac
+                        case ${inner_line:i+1:1} in
+                            '(')
+                                _inner_paren_stack+=("dp:$_inner_in_quote")
+                                _inner_in_quote=""
+                                ((i++))
+                                ;;
+                            "'")
+                                [[ $_inner_in_quote ]] && continue
+                                _inner_in_quote="\$'"
+                                ((i++))
+                                ;;
+                        esac
                         ;;
                     ';')
                         [[ $_inner_in_quote ]] && continue

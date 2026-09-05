@@ -183,6 +183,20 @@ class TestUnitCommandSubstitution:
         )
         assert assert_complete(bash, 'echo $(csub_cmd "\\")" ') == expected
 
+    def test_ansi_c_quote_containing_paren(self, bash, functions):
+        r"""Paren inside $'...' does not close the substitution.
+
+        In $'\')', the \' is an escaped quote within ANSI-C quoting, so
+        the ) that follows is still inside the string.  A scanner that
+        treats backslash as literal there, as it is in plain single
+        quotes, reads \' as closing the quote and the ) as closing the
+        $(, and falls through to command-name completion.
+        """
+        expected = (
+            self.wordlist if functions == "simple" else self.later_wordlist
+        )
+        assert assert_complete(bash, "echo $(csub_cmd $'\\')' ") == expected
+
     def test_subshell(self, bash, functions):
         """Inner subshell paren incorrectly closes the substitution."""
         assert (
