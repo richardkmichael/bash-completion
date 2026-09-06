@@ -424,16 +424,84 @@ class TestCsubPrevWordBoundary:
     def test_prev_second_arg(self, bash, functions):
         assert assert_complete(bash, "echo $(csub_report_cmd x ") == ["x"]
 
-    @pytest.mark.xfail(
-        reason="IFS splitting breaks quoted multi-word arguments"
-    )
     def test_prev_after_quoted_spaces(self, bash, functions):
-        """COMP_WORDS is built by IFS splitting, which is not quote-aware.
-
-        With the quoted argument "a b", prev should be the full quoted
-        string, but IFS splitting produces separate "a and b" words,
-        leaving b" as prev instead.
-        """
+        """A quoted argument with spaces is one word, so prev is "a b"."""
         assert assert_complete(bash, 'echo $(csub_report_cmd "a b" ') == [
             '"a b"'
         ]
+
+
+@pytest.mark.bashcomp(
+    cmd=None,
+    ignore_env=r"^[+-](COMPREPLY|REPLY)=",
+)
+class TestCsubWordSplit:
+    """Words inside $() are split as bash splits COMP_WORDS."""
+
+    @pytest.fixture(scope="class")
+    def functions(self, bash):
+        assert_bash_exec(
+            bash,
+            "_csub_report_words() {"
+            '  local IFS="|";'
+            '  COMPREPLY=("<${COMP_WORDS[*]}>${COMP_CWORD}");'
+            "}; "
+            "complete -F _csub_report_words csub_words_cmd",
+        )
+
+    @staticmethod
+    def _words(bash, line, **kwargs):
+        # Readline erases a partial current word before inserting the
+        # single completion, which shows up as leading backspaces.
+        return [x.lstrip("\b") for x in assert_complete(bash, line, **kwargs)]
+
+    @pytest.mark.parametrize(
+        "args",
+        [
+            '"a b" ',
+            "'a b' ",
+            "a\\ b ",
+            "$'a b' ",
+            'a"b c"d ',
+            "a=b ",
+            "a:b ",
+            "--opt=val ",
+            "a==b ",
+            "a= b ",
+            "a>b ",
+            '"a=b" ',
+            "a\\=b ",
+            "a",
+            "",
+            '"a b',
+            "'a b",
+            "a\\",
+            "x $(echo y) ",
+            '"$(echo y)" ',
+            "${x:-y} ",
+            "=a ",
+            "a=",
+            "<(ls) ",
+            "`echo x` ",
+        ],
+    )
+    def test_matches_top_level(self, bash, functions, args):
+        top = self._words(bash, "csub_words_cmd " + args)
+        assert self._words(bash, "echo $(csub_words_cmd " + args) == top
+
+    def test_redirection(self, bash, functions):
+        """A redirection splits as bash would.
+
+        There is no top-level result to compare with: bash's own
+        completion takes the & of >& as a command separator there.
+        """
+        assert self._words(bash, "echo $(csub_words_cmd 2>&1 ") == [
+            "<csub_words_cmd|2|>&|1|>4"
+        ]
+
+    def test_honours_comp_wordbreaks(self, bash, functions):
+        """Removing : from COMP_WORDBREAKS keeps a:b one word."""
+        env = {"COMP_WORDBREAKS": '"${COMP_WORDBREAKS//:/}"'}
+        top = self._words(bash, "csub_words_cmd a:b ", env=env)
+        assert top == ["<csub_words_cmd|a:b|>2"]
+        assert self._words(bash, "echo $(csub_words_cmd a:b ", env=env) == top

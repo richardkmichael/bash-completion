@@ -1104,6 +1104,109 @@ _comp__get_cword_at_cursor()
         -v "$3" "$cword" -v "$4" "${cur:0:index}"
 }
 
+# Set COMP_WORDS and COMP_CWORD from a command line whose cursor is at
+# its end, splitting the line the way bash builds COMP_WORDS (see
+# split_at_delims in subst.c): at unquoted COMP_WORDBREAKS characters
+# outside $(...), ${...} and `...`, where a run of non-whitespace break
+# characters is a word of its own.  Trailing unquoted whitespace yields
+# a final empty word, the one being completed.
+# @param $1 line
+_comp__split_comp_words()
+{
+    local _line=$1
+    local i n=${#_line} j ch
+    local -a _words=() _stack=()
+    # _quote is empty, ', ", $' or `, as in the scanners of
+    # _comp_initialize.  _stack holds, for each open $(, ${ or a (
+    # nested in a $(, its opening character followed by the quote
+    # state to restore when it closes.
+    local _quote="" _bt_saved_quote="" _start=-1 _after_ws=1
+    for ((i = 0; i < n; i++)); do
+        ch=${_line:i:1}
+        if [[ ! $_quote && $ch != [\'\"] &&
+            ${COMP_WORDBREAKS-} == *"$ch"* ]] && ((${#_stack[@]} == 0)); then
+            ((_start >= 0)) && _words+=("${_line:_start:i-_start}")
+            _start=-1
+            if [[ $ch == [[:space:]] ]]; then
+                _after_ws=1
+                continue
+            fi
+            for ((j = i + 1; j < n; j++)); do
+                ch=${_line:j:1}
+                [[ $ch != [[:space:]\'\"] && $COMP_WORDBREAKS == *"$ch"* ]] ||
+                    break
+            done
+            _words+=("${_line:i:j-i}")
+            _after_ws=0
+            i=$((j - 1))
+            continue
+        fi
+        ((_start < 0)) && _start=$i
+        case $ch in
+            \\) [[ $_quote == "'" ]] || ((i++)) ;;
+            \')
+                case $_quote in
+                    '"' | '`') ;;
+                    "") _quote="'" ;;
+                    *) _quote="" ;;
+                esac
+                ;;
+            '"')
+                case $_quote in
+                    "'" | "\$'" | '`') ;;
+                    '"') _quote="" ;;
+                    *) _quote='"' ;;
+                esac
+                ;;
+            '`')
+                case $_quote in
+                    "'" | "\$'") ;;
+                    '`') _quote=$_bt_saved_quote ;;
+                    *)
+                        _bt_saved_quote=$_quote
+                        _quote='`'
+                        ;;
+                esac
+                ;;
+            '$')
+                case $_quote in "'" | "\$'" | '`') continue ;; esac
+                case ${_line:i+1:1} in
+                    '(' | '{')
+                        _stack+=("${_line:i+1:1}$_quote")
+                        _quote=""
+                        ((i++))
+                        ;;
+                    "'")
+                        [[ $_quote ]] && continue
+                        _quote="\$'"
+                        ((i++))
+                        ;;
+                esac
+                ;;
+            '(')
+                [[ $_quote ]] && continue
+                ((${#_stack[@]})) && [[ ${_stack[-1]:0:1} == '(' ]] &&
+                    _stack+=("($_quote")
+                ;;
+            ')' | '}')
+                [[ $_quote ]] && continue
+                ((${#_stack[@]})) || continue
+                [[ $ch == ')' && ${_stack[-1]:0:1} == '(' ||
+                    $ch == '}' && ${_stack[-1]:0:1} == '{' ]] || continue
+                _quote=${_stack[-1]:1}
+                unset -v '_stack[-1]'
+                ;;
+        esac
+    done
+    if ((_start >= 0)); then
+        _words+=("${_line:_start}")
+    elif ((_after_ws)); then
+        _words+=("")
+    fi
+    COMP_WORDS=("${_words[@]}")
+    COMP_CWORD=$((${#_words[@]} - 1))
+}
+
 # Get the word to complete and optional previous words.
 # This is nicer than ${COMP_WORDS[COMP_CWORD]}, since it handles cases
 # where the user is completing in the middle of a word.
@@ -1927,16 +2030,7 @@ _comp_initialize()
 
             COMP_LINE=$inner_line
             COMP_POINT=${#inner_line}
-            _comp_split COMP_WORDS "$inner_line"
-
-            # _comp_split discards trailing whitespace, but
-            # if a trailing space was present the cursor is
-            # past the last word.  Append an empty word so
-            # COMP_CWORD points to the empty position.
-            if [[ $inner_line == *[[:space:]] ]]; then
-                COMP_WORDS+=("")
-            fi
-            COMP_CWORD=$((${#COMP_WORDS[@]} - 1))
+            _comp__split_comp_words "$inner_line"
 
             # Unset words so _comp_command_offset uses
             # COMP_WORDS directly (same pattern as
