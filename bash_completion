@@ -1111,19 +1111,79 @@ _comp__get_cword_at_cursor()
 # characters is a word of its own.  Trailing unquoted whitespace yields
 # a final empty word, the one being completed.
 # @param $1 line
+# Advance a character-by-character scan of shell quoting.
+#
+# Callers walk a line with an index i and keep the quoting state in
+# _comp__quote and _comp__quote_bt.  For the characters that only affect
+# quoting -- ' " ` \ and the $ of $'...' -- this function updates that
+# state, advances i past what it consumed, and returns 0, so that the
+# caller can go on to the next character.  For every other character,
+# including the $ of $( and ${, it changes nothing and returns 1, leaving
+# the character to the caller.
+#
+# _comp__quote holds the enclosing quote: empty when unquoted, ' or ", $'
+# inside an ANSI-C string, where backslash still escapes, or ` inside an
+# old-style command substitution, whose body is skipped as opaque: quotes
+# inside it do not protect a closing backtick, only a backslash does.
+# _comp__quote_bt holds the quote in force when the backtick opened,
+# restored when it closes.
+#
+# i, _comp__quote and _comp__quote_bt are the caller's own locals and are
+# updated in place.
+#
+# @param $1 line  Line being scanned
+# @param $2 char  Character at index i
+_comp__scan_quoting()
+{
+    case $2 in
+        \') # Single quote: opens or closes one, and closes an ANSI-C
+            # $'...'.  Literal inside double quotes and backticks.
+            case $_comp__quote in '"' | '`') return 0 ;; esac
+            [[ $_comp__quote ]] && _comp__quote="" || _comp__quote="'"
+            ;;
+        '"') # Double quote: literal inside single quotes, plain or
+            # ANSI-C, and inside backticks
+            case $_comp__quote in "'" | "\$'" | '`') return 0 ;; esac
+            [[ $_comp__quote == '"' ]] && _comp__quote="" || _comp__quote='"'
+            ;;
+        '`') # Backtick: opens or closes an old-style substitution
+            case $_comp__quote in "'" | "\$'") return 0 ;; esac
+            if [[ $_comp__quote == '`' ]]; then
+                _comp__quote=$_comp__quote_bt
+            else
+                _comp__quote_bt=$_comp__quote
+                _comp__quote='`'
+            fi
+            ;;
+        \\) # Backslash: escapes the next character, except in single
+            # quotes, where it is itself literal
+            [[ $_comp__quote == "'" ]] || ((i++))
+            ;;
+        '$') # $' opens an ANSI-C string, but only when unquoted; inside
+            # "..." it is a literal $ and quote.  $( and ${ are left to
+            # the caller, which records them on its own stack.
+            case $_comp__quote in "'" | "\$'" | '`') return 0 ;; esac
+            [[ ! $_comp__quote && ${1:i+1:1} == "'" ]] || return 1
+            _comp__quote="\$'"
+            ((i++))
+            ;;
+        *) return 1 ;;
+    esac
+    return 0
+}
+
 _comp__split_comp_words()
 {
     local _line=$1
     local i n=${#_line} j ch
     local -a _words=() _stack=()
-    # _quote is empty, ', ", $' or `, as in the scanners of
-    # _comp_initialize.  _stack holds, for each open $(, ${ or a (
-    # nested in a $(, its opening character followed by the quote
-    # state to restore when it closes.
-    local _quote="" _bt_saved_quote="" _start=-1 _after_ws=1
+    # _stack holds, for each open $(, ${ or a ( nested in a $(, its
+    # opening character followed by the quote state to restore when it
+    # closes.  The quote state itself is _comp__scan_quoting's.
+    local _comp__quote="" _comp__quote_bt="" _start=-1 _after_ws=1
     for ((i = 0; i < n; i++)); do
         ch=${_line:i:1}
-        if [[ ! $_quote && $ch != [\'\"] &&
+        if [[ ! $_comp__quote && $ch != [\'\"] &&
             ${COMP_WORDBREAKS-} == *"$ch"* ]] && ((${#_stack[@]} == 0)); then
             ((_start >= 0)) && _words+=("${_line:_start:i-_start}")
             _start=-1
@@ -1143,57 +1203,31 @@ _comp__split_comp_words()
         fi
         ((_start < 0)) && _start=$i
         case $ch in
-            \\) [[ $_quote == "'" ]] || ((i++)) ;;
-            \')
-                case $_quote in
-                    '"' | '`') ;;
-                    "") _quote="'" ;;
-                    *) _quote="" ;;
-                esac
+            [\'\"\`\\]) # Quoting is handled wholly by the helper
+                _comp__scan_quoting "$_line" "$ch"
+                continue
                 ;;
-            '"')
-                case $_quote in
-                    "'" | "\$'" | '`') ;;
-                    '"') _quote="" ;;
-                    *) _quote='"' ;;
-                esac
-                ;;
-            '`')
-                case $_quote in
-                    "'" | "\$'") ;;
-                    '`') _quote=$_bt_saved_quote ;;
-                    *)
-                        _bt_saved_quote=$_quote
-                        _quote='`'
-                        ;;
-                esac
-                ;;
-            '$')
-                case $_quote in "'" | "\$'" | '`') continue ;; esac
+            '$') # $( and ${ hold a nested scan, opaque to word splitting
+                _comp__scan_quoting "$_line" "$ch" && continue
                 case ${_line:i+1:1} in
                     '(' | '{')
-                        _stack+=("${_line:i+1:1}$_quote")
-                        _quote=""
-                        ((i++))
-                        ;;
-                    "'")
-                        [[ $_quote ]] && continue
-                        _quote="\$'"
+                        _stack+=("${_line:i+1:1}$_comp__quote")
+                        _comp__quote=""
                         ((i++))
                         ;;
                 esac
                 ;;
             '(')
-                [[ $_quote ]] && continue
+                [[ $_comp__quote ]] && continue
                 ((${#_stack[@]})) && [[ ${_stack[-1]:0:1} == '(' ]] &&
-                    _stack+=("($_quote")
+                    _stack+=("($_comp__quote")
                 ;;
             ')' | '}')
-                [[ $_quote ]] && continue
+                [[ $_comp__quote ]] && continue
                 ((${#_stack[@]})) || continue
                 [[ $ch == ')' && ${_stack[-1]:0:1} == '(' ||
                     $ch == '}' && ${_stack[-1]:0:1} == '{' ]] || continue
-                _quote=${_stack[-1]:1}
+                _comp__quote=${_stack[-1]:1}
                 unset -v '_stack[-1]'
                 ;;
         esac
@@ -1771,74 +1805,37 @@ _comp_initialize()
     # (paren_stack[-1]).
     if ((BASH_VERSINFO[0] >= 5 || BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 3)) &&
         [[ $cur == *'$('* ]]; then
-        # Each paren_stack entry encodes the paren type and the
-        # in_quote state to restore when the paren is closed:
+        # Each paren_stack entry encodes the paren type and the quote
+        # state to restore when the paren is closed:
         #   dp$i:$q  — dollar-paren $( at position $i, saved quote $q
         #   p:$q     — bare (, saved quote $q
         local -a paren_stack=()
-        local i n=${#cur}
-        # in_quote holds the enclosing quote: empty when unquoted, ' or ",
-        # $' inside an ANSI-C string (where backslash still escapes), or
-        # ` inside an old-style command substitution, whose body is
-        # skipped as opaque: quotes inside it do not protect a closing
-        # backtick, only a backslash does.  The quote state in force when
-        # a backtick pair opens is restored when it closes.
-        local in_quote="" bt_saved_quote="" ch
+        local i n=${#cur} ch
+        local _comp__quote="" _comp__quote_bt=""
         for ((i = 0; i < n; i++)); do
             ch=${cur:i:1}
             case $ch in
-                \') # Single quote: toggle unless inside double quotes.
-                    # Also closes an ANSI-C $'...' string.
-                    case $in_quote in '"' | '`') continue ;; esac
-                    [[ $in_quote ]] && in_quote="" || in_quote="'"
+                [\'\"\`\\]) # Quoting is handled wholly by the helper
+                    _comp__scan_quoting "$cur" "$ch"
+                    continue
                     ;;
-                '"') # Double quote: toggle unless inside single quotes
-                    # (plain or ANSI-C)
-                    case $in_quote in "'" | "\$'" | '`') continue ;; esac
-                    [[ $in_quote == '"' ]] && in_quote="" || in_quote='"'
-                    ;;
-                '`') # Backtick: open or close an old-style substitution
-                    case $in_quote in "'" | "\$'") continue ;; esac
-                    if [[ $in_quote == '`' ]]; then
-                        in_quote=$bt_saved_quote
-                    else
-                        bt_saved_quote=$in_quote
-                        in_quote='`'
-                    fi
-                    ;;
-                \\) # Backslash: skip next char (literal in single quotes)
-                    [[ $in_quote == "'" ]] && continue
+                '$') # $( starts a command substitution in both unquoted
+                    # and double-quoted contexts.  Save and reset the
+                    # quote state so the interior is scanned fresh.
+                    _comp__scan_quoting "$cur" "$ch" && continue
+                    [[ ${cur:i+1:1} == '(' ]] || continue
+                    paren_stack+=("dp$i:$_comp__quote")
+                    _comp__quote=""
                     ((i++))
                     ;;
-                '$') # $( and ANSI-C $' are significant; bare $ is ignored
-                    case $in_quote in "'" | "\$'" | '`') continue ;; esac
-                    case ${cur:i+1:1} in
-                        '(')
-                            # $( starts a command substitution in both
-                            # unquoted and double-quoted contexts.  Save and
-                            # reset quote state so the interior is scanned
-                            # fresh.
-                            paren_stack+=("dp$i:$in_quote")
-                            in_quote=""
-                            ((i++))
-                            ;;
-                        "'")
-                            # $'...' is ANSI-C quoting only when unquoted;
-                            # inside "..." it is a literal $ and quote.
-                            [[ $in_quote ]] && continue
-                            in_quote="\$'"
-                            ((i++))
-                            ;;
-                    esac
-                    ;;
                 '(') # Bare paren: only meaningful outside all quotes
-                    [[ $in_quote ]] && continue
-                    paren_stack+=("p:$in_quote")
+                    [[ $_comp__quote ]] && continue
+                    paren_stack+=("p:$_comp__quote")
                     ;;
                 ')') # Close paren: only meaningful outside all quotes
-                    [[ $in_quote ]] && continue
+                    [[ $_comp__quote ]] && continue
                     ((${#paren_stack[@]})) || continue
-                    in_quote=${paren_stack[-1]#*:}
+                    _comp__quote=${paren_stack[-1]#*:}
                     unset -v 'paren_stack[-1]'
                     ;;
             esac
@@ -1878,71 +1875,32 @@ _comp_initialize()
             # Stack entries: dp:$q (dollar-paren, saved quote $q),
             #   pb:$q (bare paren opened at a command boundary),
             #   p:$q  (bare paren, not at boundary).
-            # _inner_in_quote takes the same values as in_quote above.
             local -a _inner_paren_stack=()
             local _cmd_start=0 _at_boundary=1 _popped _next
-            local _inner_in_quote="" _inner_bt_saved_quote=""
+            # The inner scan starts fresh inside the $(.
+            _comp__quote="" _comp__quote_bt=""
             for ((i = 0; i < ${#inner_line}; i++)); do
                 ch=${inner_line:i:1}
                 case $ch in
-                    \') # Single quote: toggle unless inside double quotes.
-                        # Also closes an ANSI-C $'...' string.
-                        case $_inner_in_quote in '"' | '`') continue ;; esac
-                        if [[ $_inner_in_quote ]]; then
-                            _inner_in_quote=""
-                        else
-                            _inner_in_quote="'"
-                        fi
+                    [\'\"\`\\]) # Quoting is handled wholly by the helper
+                        _comp__scan_quoting "$inner_line" "$ch"
+                        continue
                         ;;
-                    '"') # Double quote: toggle unless inside single quotes
-                        # (plain or ANSI-C)
-                        case $_inner_in_quote in
-                            "'" | "\$'" | '`') continue ;;
-                        esac
-                        if [[ $_inner_in_quote == '"' ]]; then
-                            _inner_in_quote=""
-                        else
-                            _inner_in_quote='"'
-                        fi
-                        ;;
-                    '`') # Backtick: open or close an old-style substitution
-                        case $_inner_in_quote in "'" | "\$'") continue ;; esac
-                        if [[ $_inner_in_quote == '`' ]]; then
-                            _inner_in_quote=$_inner_bt_saved_quote
-                        else
-                            _inner_bt_saved_quote=$_inner_in_quote
-                            _inner_in_quote='`'
-                        fi
-                        ;;
-                    \\) # Backslash: skip next char (literal in single quotes)
-                        [[ $_inner_in_quote == "'" ]] && continue
+                    '$') # A nested $( is scanned as its own line
+                        _comp__scan_quoting "$inner_line" "$ch" && continue
+                        [[ ${inner_line:i+1:1} == '(' ]] || continue
+                        _inner_paren_stack+=("dp:$_comp__quote")
+                        _comp__quote=""
                         ((i++))
                         ;;
-                    '$') # $( and ANSI-C $' are significant; bare $ is ignored
-                        case $_inner_in_quote in
-                            "'" | "\$'" | '`') continue ;;
-                        esac
-                        case ${inner_line:i+1:1} in
-                            '(')
-                                _inner_paren_stack+=("dp:$_inner_in_quote")
-                                _inner_in_quote=""
-                                ((i++))
-                                ;;
-                            "'")
-                                [[ $_inner_in_quote ]] && continue
-                                _inner_in_quote="\$'"
-                                ((i++))
-                                ;;
-                        esac
-                        ;;
                     ';')
-                        [[ $_inner_in_quote ]] && continue
+                        [[ $_comp__quote ]] && continue
                         ((${#_inner_paren_stack[@]})) && continue
                         _cmd_start=$((i + 1))
                         _at_boundary=1
                         ;;
                     '|')
-                        [[ $_inner_in_quote ]] && continue
+                        [[ $_comp__quote ]] && continue
                         ((${#_inner_paren_stack[@]})) && continue
                         # >| is a redirection operator, not a separator.
                         if [[ $i != 0 && ${inner_line:i-1:1} == '>' ]]; then
@@ -1959,7 +1917,7 @@ _comp_initialize()
                         _at_boundary=1
                         ;;
                     '&')
-                        [[ $_inner_in_quote ]] && continue
+                        [[ $_comp__quote ]] && continue
                         ((${#_inner_paren_stack[@]})) && continue
                         # The & of >&, <& and &> belongs to a redirection
                         # operator, not a separator.
@@ -1977,7 +1935,7 @@ _comp_initialize()
                         _at_boundary=1
                         ;;
                     '{') # Brace group opener
-                        [[ $_inner_in_quote ]] && continue
+                        [[ $_comp__quote ]] && continue
                         ((${#_inner_paren_stack[@]})) && continue
                         # { is a command separator for bash's own completion
                         # (COMMAND_SEPARATORS in bashline.c), but only where
@@ -1993,19 +1951,19 @@ _comp_initialize()
                         fi
                         ;;
                     '(')
-                        [[ $_inner_in_quote ]] && continue
+                        [[ $_comp__quote ]] && continue
                         if ((_at_boundary)) &&
                             ((${#_inner_paren_stack[@]} == 0)); then
-                            _inner_paren_stack+=("pb:$_inner_in_quote")
+                            _inner_paren_stack+=("pb:$_comp__quote")
                         else
-                            _inner_paren_stack+=("p:$_inner_in_quote")
+                            _inner_paren_stack+=("p:$_comp__quote")
                         fi
                         ;;
                     ')')
-                        [[ $_inner_in_quote ]] && continue
+                        [[ $_comp__quote ]] && continue
                         if ((${#_inner_paren_stack[@]})); then
                             _popped=${_inner_paren_stack[-1]}
-                            _inner_in_quote=${_popped#*:}
+                            _comp__quote=${_popped#*:}
                             unset -v '_inner_paren_stack[-1]'
                             if ((${#_inner_paren_stack[@]} == 0)) &&
                                 [[ ${_popped%%:*} == pb ]]; then
@@ -2017,7 +1975,7 @@ _comp_initialize()
                         _at_boundary=0
                         ;;
                     *)
-                        [[ $_inner_in_quote ]] && continue
+                        [[ $_comp__quote ]] && continue
                         [[ $ch == [[:space:]] ]] && continue
                         ((${#_inner_paren_stack[@]})) && continue
                         _at_boundary=0
