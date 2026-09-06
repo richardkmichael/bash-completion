@@ -222,18 +222,6 @@ class TestUnitCommandSubstitution:
             assert_complete(bash, 'echo $(csub_cmd "`echo )` )" ') == expected
         )
 
-    @pytest.mark.xfail(
-        reason="an unclosed ` is not a command boundary, unlike at the "
-        "top level"
-    )
-    def test_unclosed_backtick(self, bash, functions):
-        """Bash treats ` as a command separator, so at the top level
-        "csub_cmd `echo " completes for echo.  Inside $( the rest of the
-        line is swallowed and csub_cmd keeps the completion."""
-        assert assert_complete(
-            bash, "echo $(csub_cmd `echo ", cwd="shared/default"
-        ) == ["bar", "bar bar.d/", "foo", "foo.d/"]
-
     def test_subshell(self, bash, functions):
         """Inner subshell paren incorrectly closes the substitution."""
         assert (
@@ -377,6 +365,14 @@ class TestUnitCommandSubstitution:
         "the top level"
     )
     def test_redirection_before_command(self, bash, functions):
+        """A redirection before the command word hides the command.
+
+        Bash does the same at the top level, where ">/dev/null cmd "
+        offers command names rather than cmd's arguments, so this
+        mirrors bash rather than diverging from it.  Dispatching to the
+        command would be an improvement on bash, not a fix for a
+        difference from it.
+        """
         assert (
             assert_complete(bash, "echo $( >/dev/null csub_cmd ")
             == self.wordlist
@@ -386,6 +382,11 @@ class TestUnitCommandSubstitution:
         reason="! is not a command boundary, as at the top level"
     )
     def test_bang_prefix(self, bash, functions):
+        """A leading ! is not treated as a command boundary.
+
+        Bash does the same at the top level, where "! cmd " offers
+        command names rather than cmd's arguments.
+        """
         assert assert_complete(bash, "echo $( ! csub_cmd ") == self.wordlist
 
     # Not tested: scanner is not comment-aware.
@@ -483,6 +484,7 @@ class TestCsubWordSplit:
             "a=",
             "<(ls) ",
             "`echo x` ",
+            "`echo ",
         ],
     )
     def test_matches_top_level(self, bash, functions, args):
